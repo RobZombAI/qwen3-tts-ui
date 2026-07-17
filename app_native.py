@@ -162,14 +162,21 @@ def main():
     # Start the Flask server in background
     start_server()
 
-    # Wait for server to be ready
+    # Wait for server to be fully ready (health endpoint)
     import urllib.request
-    for i in range(30):
+    import json as _json
+    for i in range(60):
         try:
-            urllib.request.urlopen(f"http://127.0.0.1:{PORT}/", timeout=2)
-            break
+            r = urllib.request.urlopen(f"http://127.0.0.1:{PORT}/api/health", timeout=2)
+            data = _json.loads(r.read())
+            if data.get("status") == "alive":
+                print(f"   Server started (PID: {os.getpid()})")
+                break
         except Exception:
-            time.sleep(0.5)
+            pass
+        time.sleep(0.5)
+    else:
+        print("   ⚠️ Server may not have started — opening window anyway…")
 
     print(f"   Opening native window ({WINDOW_WIDTH}x{WINDOW_HEIGHT})…")
     print(f"   Close the window to quit — memory is freed automatically.")

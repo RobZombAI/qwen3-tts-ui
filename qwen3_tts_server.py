@@ -498,6 +498,16 @@ def api_profiles_delete():
 _shutting_down = False
 
 
+@app.route("/api/health")
+def api_health():
+    """Fast health check — always responds immediately, even before model loading."""
+    return flask.jsonify({
+        "status": "alive",
+        "time": time.time(),
+        "models_loaded": {k: _models_loaded.get(k, False) for k in MODEL_IDS},
+    })
+
+
 @app.route("/api/check_device")
 def api_check_device():
     """Check if the device can run the models. Returns compatibility report."""
@@ -1328,6 +1338,18 @@ async function init() {
 
   // Poll status
   pollStatus();
+  
+  // If init fails or times out, retry after a delay
+  setTimeout(retryInit, 5000);
+}
+
+async function retryInit() {
+  const text = document.getElementById('statusText');
+  if (text && text.textContent.includes('Initializing')) {
+    console.log('Init appears stuck — retrying…');
+    switchModel('cv');
+    pollStatus();
+  }
 }
 
 // ── Output directory ──
@@ -1436,6 +1458,10 @@ async function getModelStatus() {
 async function pollStatus() {
   try {
     const data = await getModelStatus();
+    // If we got empty data (network error), try again
+    if (!data || Object.keys(data).length === 0) {
+      throw new Error('Empty response');
+    }
     const dot = document.getElementById('statusDot');
     const text = document.getElementById('statusText');
     const btn = document.getElementById('genBtn');
@@ -1471,7 +1497,8 @@ async function pollStatus() {
       document.getElementById('retryBtn').style.display = 'none';
     }
   } catch(e) {
-    document.getElementById('statusText').textContent = '⏳ Connecting…';
+    document.getElementById('statusText').textContent = '⏳ Connecting to server…';
+    document.getElementById('statusDot').className = 'status-dot loading';
   }
   setTimeout(pollStatus, 2000);
 }
