@@ -196,14 +196,23 @@ _models_error: Dict[str, Optional[str]] = {}
 _loading_events: Dict[str, threading.Event] = {}
 
 _model_status_listeners: list = []  # callbacks for status changes
+_loading_progress: Dict[str, str] = {}  # latest progress message per model
 
 
 def notify_status(msg: str):
+    """Store latest progress and notify listeners."""
+    # Extract model type from message pattern or use current context
+    # We store globally — the caller is responsible for context
     for cb in _model_status_listeners:
         try:
             cb(msg)
         except Exception:
             pass
+
+
+def update_progress(model_type: str, msg: str):
+    """Store progress for a specific model (thread-safe via GIL)."""
+    _loading_progress[model_type] = msg
 
 
 def get_model(model_type: str, progress_callback=None) -> Tuple[Any, Optional[str]]:
@@ -239,8 +248,11 @@ def get_model(model_type: str, progress_callback=None) -> Tuple[Any, Optional[st
             meta = MODEL_META.get(model_type, {})
             name = meta.get("name", model_type)
 
-            if progress_callback:
-                progress_callback(f"Loading {name}…")
+            # Update progress — both callback and shared dict
+            for msg in [f"Loading {name}…"]:
+                update_progress(model_type, msg)
+                if progress_callback:
+                    progress_callback(msg)
 
             if torch.backends.mps.is_available():
                 device = "mps"
@@ -251,8 +263,10 @@ def get_model(model_type: str, progress_callback=None) -> Tuple[Any, Optional[st
                 model_dtype = torch.float32
                 attn_impl = "eager"
 
-            if progress_callback:
-                progress_callback(f"Downloading {name} ({device.upper()})…")
+            for msg in [f"Downloading {name} ({device.upper()})…"]:
+                update_progress(model_type, msg)
+                if progress_callback:
+                    progress_callback(msg)
 
             model = Qwen3TTSModel.from_pretrained(
                 model_id,
@@ -260,29 +274,33 @@ def get_model(model_type: str, progress_callback=None) -> Tuple[Any, Optional[st
                 attn_implementation=attn_impl,
             )
 
-            if progress_callback:
-                progress_callback("Moving to device…")
+            for msg in ["Moving to device…"]:
+                update_progress(model_type, msg)
+                if progress_callback:
+                    progress_callback(msg)
 
             if device != "cpu":
                 model.model = model.model.to(device)
             model.device = torch.device(device)
 
+            update_progress(model_type, "Warming up (compiling kernels)…")
             if progress_callback:
                 progress_callback("Warming up…")
 
-            # Warm-up
+            # Warm-up — short inference to compile MPS/CUDA kernels
+            # Use a short timeout to avoid hanging the UI
             try:
                 if model_type.startswith("cv_"):
                     model.generate_custom_voice(
-                        text="Hello.", language="English",
-                        speaker="Ryan", max_new_tokens=8,
+                        text="Hi.", language="English",
+                        speaker="Ryan", max_new_tokens=2,
                     )
                 else:
                     model.generate_voice_clone(
-                        text="Hello.", language="English",
+                        text="Hi.", language="English",
                         x_vector_only_mode=True,
-                        ref_audio=(None, 16000),  # dummy — will fail but warm up main model
-                        max_new_tokens=8,
+                        ref_audio=(None, 16000),
+                        max_new_tokens=2,
                     )
             except Exception:
                 pass
@@ -291,6 +309,7 @@ def get_model(model_type: str, progress_callback=None) -> Tuple[Any, Optional[st
             _models_loaded[model_type] = True
             _models_error[model_type] = None
             event.set()
+            update_progress(model_type, "")
 
             if progress_callback:
                 progress_callback(f"✅ {name} ready")
@@ -301,6 +320,7 @@ def get_model(model_type: str, progress_callback=None) -> Tuple[Any, Optional[st
             _models_error[model_type] = err
             _models_loaded[model_type] = False
             event.set()
+            update_progress(model_type, f"❌ {err}")
             if progress_callback:
                 progress_callback(f"❌ {name} error: {err}")
             return None, err
@@ -353,6 +373,10 @@ def api_load_model():
 
     if _models_loaded.get(model_type):
         return flask.jsonify({"status": "already_loaded", "model": model_type})
+
+    # Set initial progress
+    meta = MODEL_META.get(model_type, {})
+    update_progress(model_type, f"Queued…")
 
     # Start loading in background
     def load_bg():
@@ -581,7 +605,7 @@ def api_shutdown():
 
 @app.route("/api/status")
 def api_status():
-    """Return status for all models."""
+    """Return status for all models, including loading progress."""
     result = {}
     all_mts = list(MODEL_IDS.keys())
     for mt in all_mts:
@@ -599,12 +623,23 @@ def api_status():
         else:
             result[mt] = {"status": "not_loaded"}
 
-    # Also include any model currently loading
+    # Also include any model currently loading, with progress
     for mt, evt in _loading_events.items():
         if not evt.is_set() and mt not in result:
-            result[mt] = {"status": "loading"}
+            result[mt] = {
+                "status": "loading",
+                "progress": _loading_progress.get(mt, "Starting…"),
+            }
         elif evt.is_set():
             pass  # already handled above
+
+    # For models that are in 'not_loaded' but have progress, show as loading
+    for mt in all_mts:
+        if mt in _loading_progress and mt not in result:
+            result[mt] = {
+                "status": "loading",
+                "progress": _loading_progress.get(mt, "Starting…"),
+            }
 
     # Which model is currently active/loaded
     result["active"] = None
@@ -1486,7 +1521,8 @@ async function pollStatus() {
       document.getElementById('retryBtn').style.display = 'inline-block';
     } else if (status.status === 'loading') {
       dot.className = 'status-dot loading';
-      text.textContent = '⏳ Loading ' + fullName + '…';
+      const progress = status.progress || '';
+      text.textContent = '⏳ ' + fullName + ' — ' + progress;
       btn.disabled = true;
       document.getElementById('retryBtn').style.display = 'none';
     } else {
