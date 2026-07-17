@@ -1,0 +1,25 @@
+# Core dependencies
+qwen-tts>=0.1.0
+flask>=3.0
+werkzeug>=3.0
+
+# GUI
+pywebview>=5.0
+
+# Audio processing
+soundfile>=0.12
+numpy>=1.24
+scipy>=1.10  # via librosa
+
+# UI (browser mode fallback — optional)
+# Pillow is used by pywebview and soundfile
+Pillow>=10.0
+
+# Model inference (installed automatically by qwen-tts)
+# torch
+# torchaudio
+# transformers
+# huggingface_hub
+# accelerate
+# einops
+# librosa

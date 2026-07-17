@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+*.icns
+*.ico
+*.iconset
+
+# Config & profiles (user data)
+.qwen3tts_config.json
+.qwen3tts_profiles/
+
+# Audio output
+*.wav
+*.mp3
+
+# Temp
+/tmp/qwen3tts_clone/
+
+# PyInstaller
+*.spec
+!Qwen3TTS.spec
+
+# Environment
+.env
+.env.local
+
+# Logs
+*.log
