@@ -18,6 +18,13 @@ from pathlib import Path
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+# ── MPS Performance Optimizations ──
+import torch
+if torch.backends.mps.is_available():
+    torch.set_num_threads(8)  # Optimal for M5 Max
+    print(f"⚡ MPS: {torch.get_num_threads()} threads")
+    print(f"⚡ MPS built: {torch.backends.mps.is_built()}")
+
 from flask import Flask, request, render_template_string, send_file, jsonify
 
 app = Flask(__name__)
@@ -112,15 +119,26 @@ def load_model_thread(mt):
             log(f"✅ On {device.upper()}")
         _model.device = torch.device(device)
 
-        log(f"🔥 Warming up…")
+        log(f"🔥 Warming up (compiling MPS kernels)…")
         try:
+            import numpy as np
             if mt.startswith("cv_"):
-                _model.generate_custom_voice(text="Hi.", language="English", speaker="Ryan", max_new_tokens=2)
+                _model.generate_custom_voice(text="Hello.", language="English", speaker="Ryan", max_new_tokens=4)
             else:
-                _model.generate_voice_clone(text="Hi.", language="English", max_new_tokens=2)
-            log(f"✅ Warm-up complete")
-        except Exception as e:
-            log(f"⚠️ Warm-up: {e}")
+                # Create a synthetic reference audio for proper warm-up
+                sr_warm = 16000
+                dur_warm = 1.0
+                t_warm = np.linspace(0, dur_warm, int(sr_warm * dur_warm), endpoint=False)
+                synth_wav = (np.sin(2 * np.pi * 220 * t_warm) * 0.3).astype(np.float32)
+                _model.generate_voice_clone(
+                    text="Hello.", language="English",
+                    ref_audio=(synth_wav, sr_warm),
+                    x_vector_only_mode=True,
+                    max_new_tokens=4,
+                )
+            log(f"✅ Warm-up complete — kernels compiled")
+        except Exception as warm_e:
+            log(f"⚠️ Warm-up note: {warm_e} (generation will still work)")
 
         _model_type = mt
         _model_ready.set()
@@ -591,19 +609,21 @@ def generate_clone_thread(text, language, ref_audio_file, ref_text, mode):
             if mode == "icl" and ref_text:
                 gen_log(f"📝 ICL mode enabled (using reference transcript)")
                 gen_log(f"   ref_text: \"{ref_text[:60]}{'...' if len(ref_text)>60 else ''}\"")
-                wavs, sr = _model.generate_voice_clone(
-                    text=text, language=language,
-                    ref_audio=ref_input, ref_text=ref_text,
-                    max_new_tokens=min(2048, max(64, n_chars * 3)),
-                )
+                with torch.inference_mode():
+                    wavs, sr = _model.generate_voice_clone(
+                        text=text, language=language,
+                        ref_audio=ref_input, ref_text=ref_text,
+                        max_new_tokens=min(2048, max(64, n_chars * 3)),
+                    )
             else:
                 gen_log(f"⚡ x-vector mode (fast, no transcript needed)")
-                wavs, sr = _model.generate_voice_clone(
-                    text=text, language=language,
-                    ref_audio=ref_input,
-                    x_vector_only_mode=True,
-                    max_new_tokens=min(2048, max(64, n_chars * 3)),
-                )
+                with torch.inference_mode():
+                    wavs, sr = _model.generate_voice_clone(
+                        text=text, language=language,
+                        ref_audio=ref_input,
+                        x_vector_only_mode=True,
+                        max_new_tokens=min(2048, max(64, n_chars * 3)),
+                    )
         finally:
             _watchdog_stop.set()
 
