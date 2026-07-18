@@ -5,7 +5,7 @@ Qwen3 TTS — Native macOS App
 Professional TTS app with:
 - CustomVoice (3 models, 9 speakers)
 - Voice Clone (upload or record audio)
-- Live progress logs
+- Live progress logs during generation
 - Native pywebview window (no browser)
 - Clean shutdown
 
@@ -60,10 +60,26 @@ _model_ready = threading.Event()
 _loading_msg = "💡 Click a model above to load it"
 _loading_log = []
 
+# ── Generation state (async, with live logs) ──
+_gen_status = "idle"  # idle | running | done | error
+_gen_progress = ""
+_gen_log = []
+_gen_result = {}
+_gen_lock = threading.Lock()
+
+
 def log(msg):
     global _loading_msg, _loading_log
     _loading_msg = msg
     _loading_log.append(msg)
+    print(f"  [{time.strftime('%H:%M:%S')}] {msg}")
+
+
+def gen_log(msg):
+    with _gen_lock:
+        global _gen_progress, _gen_log
+        _gen_progress = msg
+        _gen_log.append(msg)
     print(f"  [{time.strftime('%H:%M:%S')}] {msg}")
 
 
@@ -147,9 +163,9 @@ input[type=file]{width:100%;background:#0f3460;border:1px solid #1a4a7a;color:#e
 <div class="sub">Select a model → Load → Generate. Close window to quit.</div>
 
 <div class="card" style="text-align:center">
-<button onclick="loadModel('cv_1b7')" class="mbtn" data-m="cv_1b7" style="background:#1a6b3c;border:none;padding:12px 20px;border-radius:10px;color:white;font-size:15px;cursor:pointer;margin:4px">🎤 CustomVoice 1.7B HQ</button>
-<button onclick="loadModel('cv_0b6')" class="mbtn" data-m="cv_0b6" style="background:#b8860b;border:none;padding:12px 20px;border-radius:10px;color:white;font-size:15px;cursor:pointer;margin:4px">⚡ Fast Mode 0.6B</button>
-<button onclick="loadModel('base')" class="mbtn" data-m="base" style="background:#4a4a8a;border:none;padding:12px 20px;border-radius:10px;color:white;font-size:15px;cursor:pointer;margin:4px">🧬 Voice Clone</button>
+<button onclick="loadModel('cv_1b7')" style="background:#1a6b3c;border:none;padding:12px 20px;border-radius:10px;color:white;font-size:15px;cursor:pointer;margin:4px">🎤 CustomVoice 1.7B HQ</button>
+<button onclick="loadModel('cv_0b6')" style="background:#b8860b;border:none;padding:12px 20px;border-radius:10px;color:white;font-size:15px;cursor:pointer;margin:4px">⚡ Fast Mode 0.6B</button>
+<button onclick="loadModel('base')" style="background:#4a4a8a;border:none;padding:12px 20px;border-radius:10px;color:white;font-size:15px;cursor:pointer;margin:4px">🧬 Voice Clone</button>
 <div id="status">💡 Click a model to load</div>
 <div id="logArea" class="log-area" style="display:none"></div>
 </div>
@@ -215,13 +231,9 @@ function loadModel(m) {
   document.getElementById('logArea').style.display = 'block';
   document.getElementById('logArea').innerHTML = '<div class="step">⏳ Loading...</div>';
   document.getElementById('status').textContent = '⏳ Loading...';
-  document.querySelector('.btn-gen').disabled = true;
-
-  // Toggle sections
   const isClone = m === 'base';
   document.getElementById('cvSection').style.display = isClone ? 'none' : 'block';
   document.getElementById('cloneSection').style.display = isClone ? 'block' : 'none';
-
   fetch('/load?m=' + m);
 }
 
@@ -234,27 +246,21 @@ function quitApp() {
 }
 
 // ── Audio Recording ──
-
 async function toggleRecord() {
   const btn = document.getElementById('recBtn');
   const timer = document.getElementById('recTimer');
   if (btn.classList.contains('rec')) {
-    // Stop recording
-    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-      mediaRecorder.stop();
-    }
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
     clearInterval(recTimer);
     btn.textContent = '🎤 Record';
     btn.className = 'btn-rec idle';
     btn.disabled = true;
     timer.textContent = '⏳ Processing...';
   } else {
-    // Start recording
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
-      recChunks = [];
-      recSeconds = 0;
+      recChunks = []; recSeconds = 0;
       mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) recChunks.push(e.data); };
       mediaRecorder.onstop = async () => {
         stream.getTracks().forEach(t => t.stop());
@@ -262,72 +268,60 @@ async function toggleRecord() {
         await uploadRecordedBlob(blob);
         btn.disabled = false;
       };
-      mediaRecorder.start(100); // collect data every 100ms
+      mediaRecorder.start(100);
       btn.textContent = '⏹ Stop';
       btn.className = 'btn-rec rec';
       timer.textContent = '0s';
-      recTimer = setInterval(() => {
-        recSeconds++;
-        timer.textContent = recSeconds + 's';
-      }, 1000);
-    } catch(e) {
-      alert('Microphone access denied. Please allow microphone permissions.');
-    }
+      recTimer = setInterval(() => { recSeconds++; timer.textContent = recSeconds + 's'; }, 1000);
+    } catch(e) { alert('Microphone access denied. Allow mic in System Settings > Privacy.'); }
   }
 }
 
 async function uploadRecordedBlob(blob) {
-  const formData = new FormData();
-  formData.append('file', blob, 'recording.webm');
-  formData.append('type', 'record');
+  const fd = new FormData();
+  fd.append('file', blob, 'recording.webm');
+  fd.append('type', 'record');
   try {
-    const r = await fetch('/api/upload_audio', { method: 'POST', body: formData });
+    const r = await fetch('/api/upload_audio', { method: 'POST', body: fd });
     const d = await r.json();
     if (d.success) {
       refAudioFile = d.filename;
       refAudioDuration = d.duration_sec || 0;
       document.getElementById('cloneAudioInfo').style.display = 'block';
-      document.getElementById('cloneAudioInfo').textContent = '✅ Recorded audio: ' + d.duration_sec.toFixed(1) + 's';
+      document.getElementById('cloneAudioInfo').textContent = '✅ Recorded: ' + d.duration_sec.toFixed(1) + 's';
       document.getElementById('recTimer').textContent = '✅ Saved';
-    } else {
-      document.getElementById('recTimer').textContent = '❌ Failed';
     }
-  } catch(e) {
-    document.getElementById('recTimer').textContent = '❌ Upload error';
-  }
+  } catch(e) { document.getElementById('recTimer').textContent = '❌ Error'; }
 }
 
 // ── Audio Upload ──
-
 async function uploadAudio(file) {
   if (!file) return;
-  const formData = new FormData();
-  formData.append('file', file);
-  formData.append('type', 'upload');
+  const fd = new FormData(); fd.append('file', file); fd.append('type', 'upload');
   document.getElementById('cloneAudioInfo').style.display = 'block';
   document.getElementById('cloneAudioInfo').textContent = '⏳ Uploading...';
   try {
-    const r = await fetch('/api/upload_audio', { method: 'POST', body: formData });
+    const r = await fetch('/api/upload_audio', { method: 'POST', body: fd });
     const d = await r.json();
     if (d.success) {
-      refAudioFile = d.filename;
-      refAudioDuration = d.duration_sec || 0;
+      refAudioFile = d.filename; refAudioDuration = d.duration_sec || 0;
       document.getElementById('cloneAudioInfo').textContent = '✅ ' + file.name + ' (' + d.duration_sec.toFixed(1) + 's)';
-    } else {
-      document.getElementById('cloneAudioInfo').textContent = '❌ Upload failed';
     }
-  } catch(e) {
-    document.getElementById('cloneAudioInfo').textContent = '❌ Upload error';
-  }
+  } catch(e) { document.getElementById('cloneAudioInfo').textContent = '❌ Upload error'; }
 }
 
-// ── Voice Clone Generation ──
-
+// ── Voice Clone Generation (async, with live logs) ──
 async function generateClone() {
   const text = document.getElementById('cloneText').value.trim();
   if (!text) { alert('Enter text to speak'); return; }
-  if (!refAudioFile) { alert('Upload or record a reference audio first'); return; }
+  if (!refAudioFile) { alert('Upload or record reference audio first'); return; }
   document.querySelector('.btn-gen').disabled = true;
+  // Show log area immediately
+  const logArea = document.getElementById('logArea');
+  logArea.style.display = 'block';
+  logArea.innerHTML = '<div class="step">⏳ Starting generation...</div>';
+  document.getElementById('status').textContent = '⏳ Generating...';
+  document.getElementById('output').style.display = 'none';
   try {
     const r = await fetch('/api/generate_clone', {
       method: 'POST',
@@ -340,47 +334,78 @@ async function generateClone() {
         mode: document.getElementById('cloneMode').value,
       })
     });
-    const d = await r.json();
-    if (d.success) {
-      document.getElementById('output').style.display = 'block';
-      document.getElementById('player').src = '/output/' + d.filename;
+    const startResp = await r.json();
+    if (startResp.status !== 'started') {
+      document.getElementById('status').textContent = '❌ Failed to start';
       document.querySelector('.btn-gen').disabled = false;
-    } else {
-      alert('Generation failed: ' + (d.error || 'unknown error'));
-      document.querySelector('.btn-gen').disabled = false;
+      return;
     }
+    // Poll for completion
+    for (let i = 0; i < 300; i++) {  // max 300 * 1.5s = 7.5 minutes
+      await new Promise(r => setTimeout(r, 1500));
+      const cr = await fetch('/api/check_generation');
+      const c = await cr.json();
+      if (c.status === 'done') {
+        document.getElementById('output').style.display = 'block';
+        document.getElementById('player').src = '/output/' + c.result.filename;
+        document.getElementById('status').textContent = '✅ Generated (' + c.result.duration.toFixed(1) + 's)';
+        document.querySelector('.btn-gen').disabled = false;
+        return;
+      } else if (c.status === 'error') {
+        document.getElementById('status').textContent = '❌ Failed: ' + (c.result.error || 'error');
+        document.querySelector('.btn-gen').disabled = false;
+        return;
+      }
+      // Status polling handles showing the logs
+    }
+    document.getElementById('status').textContent = '❌ Timeout';
+    document.querySelector('.btn-gen').disabled = false;
   } catch(e) {
-    alert('Error: ' + e.message);
+    document.getElementById('status').textContent = '❌ Error: ' + e.message;
     document.querySelector('.btn-gen').disabled = false;
   }
 }
 
-// ── Status Polling ──
-
+// ── Status Polling (shows both model loading AND generation progress) ──
 setInterval(async () => {
   try {
     let r = await fetch('/api_status');
     let d = await r.json();
     let s = document.getElementById('status');
-    if (d.loading) {
+    let logArea = document.getElementById('logArea');
+    let logs = [];
+
+    // Combine model loading + generation logs
+    if (d.log && d.log.length > 0) logs = logs.concat(d.log);
+    if (d.gen_log && d.gen_log.length > 0) logs = logs.concat(d.gen_log);
+
+    if (d.gen_status === 'running') {
+      s.textContent = '⏳ ' + (d.gen_progress || 'Generating...');
+      document.querySelectorAll('.btn-gen').forEach(b => b.disabled = true);
+    } else if (d.gen_status === 'error') {
+      // Error is shown by generateClone response
+    } else if (d.loading) {
       s.textContent = '⏳ ' + d.msg;
     } else if (d.model) {
-      s.style.color = '#4ade80';
-      s.textContent = '✅ ' + d.model + ' ready';
-      document.querySelector('.btn-gen').disabled = false;
+      if (!s.textContent.startsWith('✅ Generated')) {
+        s.style.color = '#4ade80';
+        s.textContent = '✅ ' + d.model + ' ready';
+        document.querySelectorAll('.btn-gen').forEach(b => b.disabled = false);
+      }
     }
-    if (d.log && d.log.length > 0) {
-      let la = document.getElementById('logArea');
-      la.style.display = 'block';
-      la.innerHTML = d.log.map(function(l) {
+
+    if (logs.length > 0) {
+      logArea.style.display = 'block';
+      logArea.innerHTML = logs.map(function(l) {
         let cls = 'info';
-        if (l.includes('✅')) cls = 'ok';
+        if (l.startsWith('🧬') || l.startsWith('🎯') || l.startsWith('📥')) cls = 'step';
+        else if (l.includes('✅')) cls = 'ok';
         else if (l.includes('⚠️')) cls = 'warn';
         else if (l.includes('❌')) cls = 'err';
         else if (l.includes('📦')||l.includes('📤')||l.includes('🔥')||l.includes('⚙️')||l.includes('🔃')) cls = 'step';
         return '<div class="' + cls + '">' + l + '</div>';
       }).join('');
-      la.scrollTop = la.scrollHeight;
+      logArea.scrollTop = logArea.scrollHeight;
     }
   } catch(e) {}
 }, 1500);
@@ -429,9 +454,20 @@ def load_model():
 
 @app.route("/api_status")
 def api_status():
+    with _gen_lock:
+        gen_status = _gen_status
+        gen_progress = _gen_progress
+        gen_log_copy = list(_gen_log)
     if _model_ready.is_set() and _model:
-        return jsonify({"model": MODEL_NAMES.get(_model_type), "loading": False, "log": list(_loading_log)})
-    return jsonify({"loading": True, "msg": _loading_msg, "log": list(_loading_log)})
+        return jsonify({
+            "model": MODEL_NAMES.get(_model_type), "loading": False,
+            "log": list(_loading_log),
+            "gen_status": gen_status, "gen_progress": gen_progress, "gen_log": gen_log_copy,
+        })
+    return jsonify({
+        "loading": True, "msg": _loading_msg, "log": list(_loading_log),
+        "gen_status": gen_status, "gen_progress": gen_progress, "gen_log": gen_log_copy,
+    })
 
 @app.route("/api/upload_audio", methods=["POST"])
 def upload_audio():
@@ -441,14 +477,14 @@ def upload_audio():
     if f.filename == "":
         return jsonify({"success": False, "error": "No file selected"})
 
-    ext = os.path.splitext(f.filename)[1] or ".webm"
+    ext = os.path.splitext(f.filename)[1] if '.' in f.filename else ".webm"
     fname = f"ref_{uuid.uuid4().hex[:8]}{ext}"
     fpath = os.path.join(TEMP_DIR, fname)
     f.save(fpath)
 
     # Get duration
+    import soundfile as sf
     try:
-        import soundfile as sf
         data, sr = sf.read(fpath)
         dur = len(data) / sr
     except:
@@ -457,10 +493,87 @@ def upload_audio():
     log(f"📥 Audio uploaded: {fname} ({dur:.1f}s)")
     return jsonify({"success": True, "filename": fname, "duration_sec": dur})
 
+def generate_clone_thread(text, language, ref_audio_file, ref_text, mode):
+    """Background thread for voice clone. Updates gen_log with progress."""
+    global _gen_result, _gen_status, _gen_log
+    try:
+        import soundfile as sf
+        import numpy as np
+
+        gen_log(f"🧬 Voice clone: {len(text)} chars, mode={mode}, lang={language}")
+
+        ref_path = os.path.join(TEMP_DIR, os.path.basename(ref_audio_file))
+        if not os.path.exists(ref_path):
+            gen_log("❌ Reference audio not found")
+            with _gen_lock:
+                _gen_status = "error"
+                _gen_result = {"success": False, "error": "Reference audio not found"}
+            return
+
+        gen_log("📖 Loading reference audio...")
+        ref_wav, ref_sr = sf.read(ref_path)
+
+        if len(ref_wav.shape) > 1:
+            ref_wav = np.mean(ref_wav, axis=1)
+            gen_log("🔊 Converted stereo to mono")
+
+        if ref_sr != 16000:
+            import scipy.signal
+            new_len = int(len(ref_wav) * 16000 / ref_sr)
+            ref_wav = scipy.signal.resample(ref_wav, new_len)
+            ref_sr = 16000
+            gen_log(f"🔄 Resampled to 16kHz")
+
+        if ref_wav.dtype != np.float32:
+            ref_wav = ref_wav.astype(np.float32)
+        if np.abs(ref_wav).max() > 1.0:
+            ref_wav = ref_wav / 32768.0
+
+        ref_input = (ref_wav, ref_sr)
+
+        gen_log("🤖 Running model inference...")
+
+        if mode == "icl" and ref_text:
+            gen_log(f"📝 Using ICL mode with reference text")
+            wavs, sr = _model.generate_voice_clone(
+                text=text, language=language,
+                ref_audio=ref_input, ref_text=ref_text,
+                max_new_tokens=min(2048, max(64, len(text)*3)),
+            )
+        else:
+            gen_log(f"⚡ Using x-vector mode")
+            wavs, sr = _model.generate_voice_clone(
+                text=text, language=language,
+                ref_audio=ref_input,
+                x_vector_only_mode=True,
+                max_new_tokens=min(2048, max(64, len(text)*3)),
+            )
+
+        gen_log("💾 Saving audio...")
+        ts = int(time.time() * 1000)
+        fname = f"qwen3tts_clone_{ts}.wav"
+        sf.write(os.path.join(OUTPUT_DIR, fname), wavs[0] if isinstance(wavs, (list, tuple)) else wavs, sr)
+        dur = len(wavs[0] if isinstance(wavs, (list, tuple)) else wavs) / sr
+
+        gen_log(f"✅ Done! {dur:.1f}s audio generated")
+        with _gen_lock:
+            _gen_status = "done"
+            _gen_result = {"success": True, "filename": fname, "duration": dur}
+    except Exception as e:
+        gen_log(f"❌ Error: {e}")
+        import traceback
+        gen_log(traceback.format_exc()[-200:])
+        with _gen_lock:
+            _gen_status = "error"
+            _gen_result = {"success": False, "error": str(e)}
+
+
 @app.route("/api/generate_clone", methods=["POST"])
 def generate_clone():
     if not _model_ready.is_set() or not _model:
-        return jsonify({"success": False, "error": "Model not loaded"})
+        return jsonify({"success": False, "error": "Model not loaded — click Voice Clone first"})
+    if not _model_type == "base":
+        return jsonify({"success": False, "error": "Load the Voice Clone (base) model first"})
 
     data = request.get_json()
     text = (data.get("text") or "").strip()
@@ -471,64 +584,33 @@ def generate_clone():
     ref_audio_file = data.get("ref_audio_file", "")
     ref_text = (data.get("ref_text") or "").strip()
     mode = data.get("mode", "x_vector")
-
-    ref_path = os.path.join(TEMP_DIR, os.path.basename(ref_audio_file))
-    if not os.path.exists(ref_path):
-        return jsonify({"success": False, "error": "Reference audio not found — re-upload"})
-
-    log(f"🧬 Voice clone: {len(text)} chars, mode={mode}, lang={lang}")
-
-    import soundfile as sf
-    import numpy as np
-
     language = lang if lang != "Auto" else "English"
 
-    # Read reference audio → convert to mono 16kHz, pass as (numpy, sr)
-    ref_wav, ref_sr = sf.read(ref_path)
-    
-    # Convert to mono if stereo
-    if len(ref_wav.shape) > 1:
-        ref_wav = np.mean(ref_wav, axis=1)
-    
-    # Resample to 16kHz if needed
-    if ref_sr != 16000:
-        import scipy.signal
-        old_len = len(ref_wav)
-        new_len = int(old_len * 16000 / ref_sr)
-        ref_wav = scipy.signal.resample(ref_wav, new_len)
-        ref_sr = 16000
+    # Start generation in background
+    with _gen_lock:
+        global _gen_status, _gen_log, _gen_result
+        _gen_status = "running"
+        _gen_log = []
+        _gen_result = {}
 
-    # Normalize to [-1, 1] float
-    if ref_wav.dtype != np.float32:
-        ref_wav = ref_wav.astype(np.float32)
-    if np.abs(ref_wav).max() > 1.0:
-        ref_wav = ref_wav / 32768.0
+    threading.Thread(
+        target=generate_clone_thread,
+        args=(text, language, ref_audio_file, ref_text, mode),
+        daemon=True
+    ).start()
 
-    ref_input = (ref_wav, ref_sr)
+    return jsonify({"status": "started"})
 
-    if mode == "icl" and ref_text:
-        log(f"🧬 ICL mode: text={len(text)} chars, ref_text={len(ref_text)} chars")
-        wavs, sr = _model.generate_voice_clone(
-            text=text, language=language,
-            ref_audio=ref_input, ref_text=ref_text,
-            max_new_tokens=min(2048, max(64, len(text)*3)),
-        )
-    else:
-        log(f"🧬 x-vector mode: text={len(text)} chars")
-        wavs, sr = _model.generate_voice_clone(
-            text=text, language=language,
-            ref_audio=ref_input,
-            x_vector_only_mode=True,
-            max_new_tokens=min(2048, max(64, len(text)*3)),
-        )
 
-    ts = int(time.time() * 1000)
-    fname = f"qwen3tts_clone_{ts}.wav"
-    sf.write(os.path.join(OUTPUT_DIR, fname), wavs[0] if isinstance(wavs, (list, tuple)) else wavs, sr)
-    dur = len(wavs[0] if isinstance(wavs, (list, tuple)) else wavs) / sr
+@app.route("/api/check_generation")
+def check_generation():
+    with _gen_lock:
+        return jsonify({
+            "status": _gen_status,
+            "progress": _gen_progress,
+            "result": _gen_result,
+        })
 
-    log(f"✅ Clone generated: {dur:.1f}s → {fname}")
-    return jsonify({"success": True, "filename": fname, "duration": dur})
 
 @app.route("/generate", methods=["POST"])
 def generate():
@@ -541,7 +623,7 @@ def generate():
     instruct = request.form.get("instruct","").strip()
     import soundfile as sf
     lang = language if language != "Auto" else None
-    log(f"🎯 Generating: {len(text)} chars, {speaker}, {language}")
+    log(f"🎯 Generating CV: {len(text)} chars, {speaker}, {language}")
     wavs, sr = _model.generate_custom_voice(text=text, language=lang, speaker=speaker, instruct=instruct if instruct else None, max_new_tokens=min(2048, max(64, len(text)*3)))
     ts = int(time.time()*1000)
     fname = f"qwen3tts_{ts}.wav"
@@ -555,7 +637,6 @@ def generate():
 @app.route("/output/<path:fname>")
 def serve_output(fname):
     fname = os.path.basename(fname)
-    # Check in OUTPUT_DIR first, then TEMP_DIR
     for d in [OUTPUT_DIR, TEMP_DIR]:
         fp = os.path.join(d, fname)
         if os.path.exists(fp):
