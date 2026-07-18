@@ -479,26 +479,42 @@ def generate_clone():
     log(f"🧬 Voice clone: {len(text)} chars, mode={mode}, lang={lang}")
 
     import soundfile as sf
-    import torch
+    import numpy as np
 
-    language = lang if lang != "Auto" else None
+    language = lang if lang != "Auto" else "English"
 
-    # Read reference audio → pass as (numpy_array, sr) tuple
+    # Read reference audio → convert to mono 16kHz, pass as (numpy, sr)
     ref_wav, ref_sr = sf.read(ref_path)
+    
+    # Convert to mono if stereo
+    if len(ref_wav.shape) > 1:
+        ref_wav = np.mean(ref_wav, axis=1)
+    
+    # Resample to 16kHz if needed
     if ref_sr != 16000:
         import scipy.signal
-        ref_wav = scipy.signal.resample(ref_wav, int(len(ref_wav) * 16000 / ref_sr))
+        old_len = len(ref_wav)
+        new_len = int(old_len * 16000 / ref_sr)
+        ref_wav = scipy.signal.resample(ref_wav, new_len)
         ref_sr = 16000
 
-    ref_input = (ref_wav, ref_sr)  # Tuple[numpy.ndarray, int]
+    # Normalize to [-1, 1] float
+    if ref_wav.dtype != np.float32:
+        ref_wav = ref_wav.astype(np.float32)
+    if np.abs(ref_wav).max() > 1.0:
+        ref_wav = ref_wav / 32768.0
+
+    ref_input = (ref_wav, ref_sr)
 
     if mode == "icl" and ref_text:
+        log(f"🧬 ICL mode: text={len(text)} chars, ref_text={len(ref_text)} chars")
         wavs, sr = _model.generate_voice_clone(
             text=text, language=language,
             ref_audio=ref_input, ref_text=ref_text,
             max_new_tokens=min(2048, max(64, len(text)*3)),
         )
     else:
+        log(f"🧬 x-vector mode: text={len(text)} chars")
         wavs, sr = _model.generate_voice_clone(
             text=text, language=language,
             ref_audio=ref_input,
