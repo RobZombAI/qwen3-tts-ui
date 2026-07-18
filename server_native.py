@@ -80,6 +80,9 @@ def gen_log(msg):
         global _gen_progress, _gen_log
         _gen_progress = msg
         _gen_log.append(msg)
+        # Keep last 50 entries to avoid UI clutter
+        if len(_gen_log) > 50:
+            _gen_log = _gen_log[-50:]
     print(f"  [{time.strftime('%H:%M:%S')}] {msg}")
 
 
@@ -504,14 +507,34 @@ def upload_audio():
     return jsonify({"success": True, "filename": fname, "duration_sec": dur})
 
 def generate_clone_thread(text, language, ref_audio_file, ref_text, mode):
-    """Background thread for voice clone. Updates gen_log with progress."""
+    """Background thread for voice clone. Shows real-time progress with estimates."""
     global _gen_result, _gen_status, _gen_log
     try:
         import soundfile as sf
         import numpy as np
+        import time as _time
 
-        gen_log(f"🧬 Voice clone: {len(text)} chars, mode={mode}, lang={language}")
+        n_chars = len(text)
+        gen_log(f"🧬 Voice clone: {n_chars} chars | mode={mode} | lang={language}")
 
+        # ── Estimate time based on chars and mode ──
+        # Observed: first inference on MPS takes ~2s/token (kernel compilation)
+        # Subsequent: ~0.3s/token
+        est_tokens = max(4, int(n_chars / 2.5))
+        est_audio_sec = max(1, int(est_tokens * 0.08))
+        base_overhead = 8
+        # Realistic speed: first inference ~1.5s/token, subsequent ~0.3s/token
+        gen_per_sec = 0.7  # conservative average including compilation
+        est_inference_sec = int(est_tokens / gen_per_sec) + 5
+        est_total_sec = base_overhead + est_inference_sec
+        if mode == "icl":
+            est_total_sec += 15
+
+        gen_log(f"📊 Input analysis: {n_chars} chars ≈ ~{est_tokens} tokens")
+        gen_log(f"⏱️  Estimated audio length: ~{est_audio_sec}s")
+        gen_log(f"⚡ Estimated generation time: ~{est_total_sec}s ({mode} on MPS)")
+
+        # ── Load reference audio ──
         ref_path = os.path.join(TEMP_DIR, os.path.basename(ref_audio_file))
         if not os.path.exists(ref_path):
             gen_log("❌ Reference audio not found")
@@ -522,17 +545,19 @@ def generate_clone_thread(text, language, ref_audio_file, ref_text, mode):
 
         gen_log("📖 Loading reference audio...")
         ref_wav, ref_sr = sf.read(ref_path)
+        audio_dur = len(ref_wav) / ref_sr
+        gen_log(f"   → {audio_dur:.1f}s audio loaded")
 
         if len(ref_wav.shape) > 1:
             ref_wav = np.mean(ref_wav, axis=1)
-            gen_log("🔊 Converted stereo to mono")
+            gen_log("🔊 Converting stereo → mono")
 
         if ref_sr != 16000:
             import scipy.signal
             new_len = int(len(ref_wav) * 16000 / ref_sr)
             ref_wav = scipy.signal.resample(ref_wav, new_len)
             ref_sr = 16000
-            gen_log(f"🔄 Resampled to 16kHz")
+            gen_log(f"🔄 Resampling → 16kHz ({new_len} samples)")
 
         if ref_wav.dtype != np.float32:
             ref_wav = ref_wav.astype(np.float32)
@@ -541,38 +566,74 @@ def generate_clone_thread(text, language, ref_audio_file, ref_text, mode):
 
         ref_input = (ref_wav, ref_sr)
 
-        gen_log("🤖 Running model inference...")
+        # ── Model inference with live watchdog ──
+        gen_log("🤖 Starting model inference...")
+        gen_log(f"🎯 Target: {n_chars} chars → ~{est_audio_sec}s audio")
 
-        if mode == "icl" and ref_text:
-            gen_log(f"📝 Using ICL mode with reference text")
-            wavs, sr = _model.generate_voice_clone(
-                text=text, language=language,
-                ref_audio=ref_input, ref_text=ref_text,
-                max_new_tokens=min(2048, max(64, len(text)*3)),
-            )
-        else:
-            gen_log(f"⚡ Using x-vector mode")
-            wavs, sr = _model.generate_voice_clone(
-                text=text, language=language,
-                ref_audio=ref_input,
-                x_vector_only_mode=True,
-                max_new_tokens=min(2048, max(64, len(text)*3)),
-            )
+        # Start watchdog thread that logs progress every 5s
+        _start_time = _time.time()
+        _watchdog_stop = threading.Event()
 
-        gen_log("💾 Saving audio...")
-        ts = int(time.time() * 1000)
+        def watchdog():
+            while not _watchdog_stop.is_set():
+                _watchdog_stop.wait(5)
+                if _watchdog_stop.is_set():
+                    break
+                elapsed = _time.time() - _start_time
+                pct = min(99, int((elapsed / max(1, est_total_sec)) * 100))
+                remaining = max(1, est_total_sec - int(elapsed))
+                gen_log(f"⏳ Running... {int(elapsed)}s elapsed | ~{pct}% complete | ~{remaining}s remaining")
+
+        wd = threading.Thread(target=watchdog, daemon=True)
+        wd.start()
+
+        try:
+            if mode == "icl" and ref_text:
+                gen_log(f"📝 ICL mode enabled (using reference transcript)")
+                gen_log(f"   ref_text: \"{ref_text[:60]}{'...' if len(ref_text)>60 else ''}\"")
+                wavs, sr = _model.generate_voice_clone(
+                    text=text, language=language,
+                    ref_audio=ref_input, ref_text=ref_text,
+                    max_new_tokens=min(2048, max(64, n_chars * 3)),
+                )
+            else:
+                gen_log(f"⚡ x-vector mode (fast, no transcript needed)")
+                wavs, sr = _model.generate_voice_clone(
+                    text=text, language=language,
+                    ref_audio=ref_input,
+                    x_vector_only_mode=True,
+                    max_new_tokens=min(2048, max(64, n_chars * 3)),
+                )
+        finally:
+            _watchdog_stop.set()
+
+        _actual_time = _time.time() - _start_time
+
+        gen_log(f"✅ Inference complete in {_actual_time:.0f}s (estimated {est_total_sec}s)")
+
+        # ── Save ──
+        gen_log("💾 Saving audio file...")
+        ts = int(_time.time() * 1000)
         fname = f"qwen3tts_clone_{ts}.wav"
-        sf.write(os.path.join(OUTPUT_DIR, fname), wavs[0] if isinstance(wavs, (list, tuple)) else wavs, sr)
-        dur = len(wavs[0] if isinstance(wavs, (list, tuple)) else wavs) / sr
+        audio_out = wavs[0] if isinstance(wavs, (list, tuple)) else wavs
+        sf.write(os.path.join(OUTPUT_DIR, fname), audio_out, sr)
+        dur = len(audio_out) / sr
 
-        gen_log(f"✅ Done! {dur:.1f}s audio generated")
+        gen_log(f"📁 File: {fname}")
+        gen_log(f"📁 Location: {OUTPUT_DIR}")
+        gen_log(f"✅ Generation complete! {dur:.1f}s audio in {_actual_time:.0f}s")
+
         with _gen_lock:
             _gen_status = "done"
             _gen_result = {"success": True, "filename": fname, "duration": dur}
     except Exception as e:
-        gen_log(f"❌ Error: {e}")
+        gen_log(f"❌ Error during generation:")
+        gen_log(f"   {e}")
         import traceback
-        gen_log(traceback.format_exc()[-200:])
+        tb = traceback.format_exc()
+        for line in tb.split('\n')[-4:-1]:
+            if line.strip():
+                gen_log(f"   {line.strip()}")
         with _gen_lock:
             _gen_status = "error"
             _gen_result = {"success": False, "error": str(e)}
