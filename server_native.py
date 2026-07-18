@@ -187,6 +187,12 @@ input[type=file]{width:100%;background:#0f3460;border:1px solid #1a4a7a;color:#e
 <button onclick="loadModel('cv_1b7')" style="background:#1a6b3c;border:none;padding:12px 20px;border-radius:10px;color:white;font-size:15px;cursor:pointer;margin:4px">🎤 CustomVoice 1.7B HQ</button>
 <button onclick="loadModel('cv_0b6')" style="background:#b8860b;border:none;padding:12px 20px;border-radius:10px;color:white;font-size:15px;cursor:pointer;margin:4px">⚡ Fast Mode 0.6B</button>
 <button onclick="loadModel('base')" style="background:#4a4a8a;border:none;padding:12px 20px;border-radius:10px;color:white;font-size:15px;cursor:pointer;margin:4px">🧬 Voice Clone</button>
+<div style="margin:10px 0 0 0;font-size:12px;color:#8888aa">
+<label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+  <input type="checkbox" id="qualityToggle" style="width:auto">
+  🎯 Quality Mode (sampling + style control — slower but more natural)
+</label>
+</div>
 <div id="status">💡 Click a model to load</div>
 <div id="logArea" class="log-area" style="display:none"></div>
 </div>
@@ -203,6 +209,7 @@ input[type=file]{width:100%;background:#0f3460;border:1px solid #1a4a7a;color:#e
 <select name="speaker">""" + "".join(f'<option value="{s}">{n}</option>' for s,n in SPEAKERS.items()) + """</select>
 <label>Style (optional)</label>
 <input name="instruct" placeholder="e.g. 'Speak happily'">
+<input type="hidden" name="quality" id="cvQualityHidden" value="false">
 </form>
 </div>
 
@@ -359,6 +366,7 @@ async function generateClone() {
         ref_audio_file: refAudioFile,
         ref_text: document.getElementById('refText').value.trim() || '',
         mode: document.getElementById('cloneMode').value,
+        quality: document.getElementById('qualityToggle').checked,
       })
     });
     const startResp = await r.json();
@@ -396,6 +404,11 @@ async function generateClone() {
     document.querySelector('.btn-gen').disabled = false;
   }
 }
+
+// Sync quality toggle with CV form hidden field
+setInterval(() => {
+  document.getElementById('cvQualityHidden').value = document.getElementById('qualityToggle').checked;
+}, 500);
 
 // ── Status Polling (shows both model loading AND generation progress) ──
 setInterval(async () => {
@@ -524,7 +537,7 @@ def upload_audio():
     log(f"📥 Audio uploaded: {fname} ({dur:.1f}s)")
     return jsonify({"success": True, "filename": fname, "duration_sec": dur})
 
-def generate_clone_thread(text, language, ref_audio_file, ref_text, mode):
+def generate_clone_thread(text, language, ref_audio_file, ref_text, mode, quality=False):
     """Background thread for voice clone. Shows real-time progress with estimates."""
     global _gen_result, _gen_status, _gen_log
     try:
@@ -606,6 +619,20 @@ def generate_clone_thread(text, language, ref_audio_file, ref_text, mode):
         wd.start()
 
         try:
+            # Build quality parameters
+            gen_kwargs = {"max_new_tokens": min(2048, max(64, n_chars * 3))}
+            if quality:
+                gen_kwargs.update({
+                    "do_sample": True,
+                    "temperature": 0.7,
+                    "top_p": 0.9,
+                    "repetition_penalty": 1.1,
+                })
+                gen_log(f"🎯 Quality mode: temp=0.7, top_p=0.9, rep_penalty=1.1")
+            else:
+                gen_kwargs["do_sample"] = False
+                gen_log(f"⚡ Fast mode: greedy decoding")
+
             if mode == "icl" and ref_text:
                 gen_log(f"📝 ICL mode enabled (using reference transcript)")
                 gen_log(f"   ref_text: \"{ref_text[:60]}{'...' if len(ref_text)>60 else ''}\"")
@@ -613,16 +640,16 @@ def generate_clone_thread(text, language, ref_audio_file, ref_text, mode):
                     wavs, sr = _model.generate_voice_clone(
                         text=text, language=language,
                         ref_audio=ref_input, ref_text=ref_text,
-                        max_new_tokens=min(2048, max(64, n_chars * 3)),
+                        **gen_kwargs,
                     )
             else:
-                gen_log(f"⚡ x-vector mode (fast, no transcript needed)")
+                gen_log(f"⚡ x-vector mode enabled")
+                gen_kwargs["x_vector_only_mode"] = True
                 with torch.inference_mode():
                     wavs, sr = _model.generate_voice_clone(
                         text=text, language=language,
                         ref_audio=ref_input,
-                        x_vector_only_mode=True,
-                        max_new_tokens=min(2048, max(64, n_chars * 3)),
+                        **gen_kwargs,
                     )
         finally:
             _watchdog_stop.set()
@@ -675,6 +702,7 @@ def generate_clone():
     ref_audio_file = data.get("ref_audio_file", "")
     ref_text = (data.get("ref_text") or "").strip()
     mode = data.get("mode", "x_vector")
+    quality = data.get("quality", False)
     language = lang if lang != "Auto" else "English"
 
     # Start generation in background
@@ -686,7 +714,7 @@ def generate_clone():
 
     threading.Thread(
         target=generate_clone_thread,
-        args=(text, language, ref_audio_file, ref_text, mode),
+        args=(text, language, ref_audio_file, ref_text, mode, quality),
         daemon=True
     ).start()
 
@@ -714,8 +742,25 @@ def generate():
     instruct = request.form.get("instruct","").strip()
     import soundfile as sf
     lang = language if language != "Auto" else None
+    quality = request.form.get("quality", "false") == "true"
+    instruct_text = instruct if instruct else None
+    
+    gen_kwargs = {"max_new_tokens": min(2048, max(64, len(text)*3))}
+    if quality:
+        gen_kwargs.update({
+            "do_sample": True,
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "repetition_penalty": 1.1,
+        })
+        log(f"🎯 Quality mode: temp=0.7, top_p=0.9, rep_penalty=1.1")
+    
     log(f"🎯 Generating CV: {len(text)} chars, {speaker}, {language}")
-    wavs, sr = _model.generate_custom_voice(text=text, language=lang, speaker=speaker, instruct=instruct if instruct else None, max_new_tokens=min(2048, max(64, len(text)*3)))
+    wavs, sr = _model.generate_custom_voice(
+        text=text, language=lang, speaker=speaker,
+        instruct=instruct_text,
+        **gen_kwargs,
+    )
     ts = int(time.time()*1000)
     fname = f"qwen3tts_{ts}.wav"
     sf.write(os.path.join(OUTPUT_DIR, fname), wavs[0], sr)
