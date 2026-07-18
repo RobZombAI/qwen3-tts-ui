@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.2.0] — 2026-07-18
+
+### Added
+- Native macOS app (pywebview) — no browser needed
+- Proper "Close App" button with clean shutdown
+- MPS memory cleanup on exit
+- Live progress logs inside the app during model loading
+
+### Changed
+- Complete codebase cleanup — removed 6 legacy files
+- `.gitignore` updated for professional release
+- Server split into `server_native.py` (pywebview) and `server_minimal.py` (browser fallback)
+
+### Removed
+- `qwen3_tts_server.py` (replaced by server_native.py + server_minimal.py)
+- `win_launcher.py` (Windows build now uses PyInstaller from `scripts/`)
+- `app.py`, `app_launcher.py`, `setup.py`, `server_launcher.py`
+- `Qwen3TTS.spec`, `Qwen3TTS.launcher`
+
+## [2.1.0] — 2026-07-18
+
+### Added
+- "⏻ Quit App" button in browser UI with graceful shutdown
+- Live progress tracking for model loading
+- `server_minimal.py` — lightweight browser-based mode
+
+## [2.0.0] — 2026-07-18
+
+### Changed
+- Complete rewrite: minimal, reliable server
+- Browser mode instead of pywebview (reliability)
+- Self-contained `.app` bundle with embedded Python venv
+
 ## [1.0.0] — 2026-07-17
 
 ### Added

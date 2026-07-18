@@ -2,44 +2,28 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
-dist/
 build/
 *.egg
 .venv/
 venv/
 
+# macOS
+.DS_Store
+*.icns
+*.iconset
+
 # IDE
 .vscode/
 .idea/
 *.swp
-*.swo
-*~
-
-# macOS
-.DS_Store
-*.icns
-*.ico
-*.iconset
 
 # Config & profiles (user data)
 .qwen3tts_config.json
 .qwen3tts_profiles/
 
-# Audio output
-*.wav
-*.mp3
-
-# Temp
-/tmp/qwen3tts_clone/
-
-# PyInstaller
+# Build outputs
+dist/
 *.spec
-!Qwen3TTS.spec
 
-# Environment
-.env
-.env.local
-
-# Logs
-*.log
-Qwen3 TTS.app
+# Bundled app
+Qwen3 TTS.app/
