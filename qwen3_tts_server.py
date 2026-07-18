@@ -1155,7 +1155,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
   <!-- Model selector -->
   <div class="model-selector" id="modelSelector">
-    <button class="model-btn active" data-model="cv" onclick="switchModel('cv')">
+    <button class="model-btn" data-model="cv" onclick="switchModel('cv')">
       🎤 CustomVoice
       <span class="desc">Preset voices with style control</span>
     </button>
@@ -1368,8 +1368,10 @@ async function init() {
   // Load saved voice profiles
   loadProfiles();
 
-  // Default: load CustomVoice
-  switchModel('cv');
+  // Don't auto-load any model — user clicks to choose
+  // Set initial UI state
+  document.getElementById('cvSection').classList.remove('section-hidden');
+  document.getElementById('cloneSection').classList.add('section-hidden');
 
   // Poll status
   pollStatus();
@@ -1382,7 +1384,6 @@ async function retryInit() {
   const text = document.getElementById('statusText');
   if (text && text.textContent.includes('Initializing')) {
     console.log('Init appears stuck — retrying…');
-    switchModel('cv');
     pollStatus();
   }
 }
