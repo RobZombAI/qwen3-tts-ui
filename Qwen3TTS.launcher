@@ -1,0 +1,22 @@
+#!/bin/bash
+# Qwen3 TTS - Launcher
+# Runs server in foreground. App stays in Dock while running.
+# Click "⏻ Quit App" in the browser to shut down cleanly.
+
+DIR="$(cd "$(dirname "$0")/../Resources" && pwd)"
+
+# Start server in background
+"$DIR/venv/bin/python3" "$DIR/server_minimal.py" &
+SERVER_PID=$!
+
+# Wait for server to be ready
+for i in $(seq 1 30); do
+  curl -s http://localhost:8765/api_status > /dev/null 2>&1 && break
+  sleep 1
+done
+
+# Open browser
+open http://localhost:8765
+
+# Wait for server to exit (user clicked "Quit App")
+wait $SERVER_PID

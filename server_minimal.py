@@ -176,6 +176,8 @@ audio{width:100%;margin-top:12px}
 <audio id="player" controls></audio>
 </div>
 
+<button onclick="fetch('/quit').then(()=>window.close())" style="width:100%;padding:10px;border:none;border-radius:8px;background:#4a1a1a;color:#f87171;font-size:13px;cursor:pointer;margin-top:8px">⏻ Quit App</button>
+
 <script>
 function loadModel(m) {
   let status = document.getElementById('status');
@@ -328,6 +330,30 @@ def generate():
 def serve_output(fname):
     fpath = os.path.join(OUTPUT_DIR, os.path.basename(fname))
     return send_file(fpath, mimetype="audio/wav")
+
+
+@app.route("/quit")
+def quit_app():
+    """Clean shutdown: free memory, exit process. Called by 'Quit App' button."""
+    log("⏻ Shutting down...")
+
+    # Free MPS memory
+    try:
+        import torch
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+            torch.mps.synchronize()
+    except Exception:
+        pass
+
+    # Stop Flask and exit after response is sent
+    def _shutdown():
+        import time
+        time.sleep(0.2)
+        os._exit(0)
+    threading.Thread(target=_shutdown, daemon=True).start()
+
+    return jsonify({"status": "shutdown"})
 
 
 # ── Main ──
