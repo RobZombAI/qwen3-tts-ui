@@ -322,6 +322,12 @@ async function generateClone() {
   logArea.innerHTML = '<div class="step">⏳ Starting generation...</div>';
   document.getElementById('status').textContent = '⏳ Generating...';
   document.getElementById('output').style.display = 'none';
+  // Start elapsed timer
+  let genStart = Date.now();
+  let genTimer = setInterval(() => {
+    let sec = Math.floor((Date.now() - genStart) / 1000);
+    document.getElementById('status').textContent = '⏳ Generating... (' + sec + 's)';
+  }, 1000);
   try {
     const r = await fetch('/api/generate_clone', {
       method: 'POST',
@@ -346,21 +352,25 @@ async function generateClone() {
       const cr = await fetch('/api/check_generation');
       const c = await cr.json();
       if (c.status === 'done') {
+        clearInterval(genTimer);
         document.getElementById('output').style.display = 'block';
         document.getElementById('player').src = '/output/' + c.result.filename;
         document.getElementById('status').textContent = '✅ Generated (' + c.result.duration.toFixed(1) + 's)';
         document.querySelector('.btn-gen').disabled = false;
         return;
       } else if (c.status === 'error') {
+        clearInterval(genTimer);
         document.getElementById('status').textContent = '❌ Failed: ' + (c.result.error || 'error');
         document.querySelector('.btn-gen').disabled = false;
         return;
       }
       // Status polling handles showing the logs
     }
+    clearInterval(genTimer);
     document.getElementById('status').textContent = '❌ Timeout';
     document.querySelector('.btn-gen').disabled = false;
   } catch(e) {
+    clearInterval(genTimer);
     document.getElementById('status').textContent = '❌ Error: ' + e.message;
     document.querySelector('.btn-gen').disabled = false;
   }
