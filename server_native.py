@@ -483,25 +483,26 @@ def generate_clone():
 
     language = lang if lang != "Auto" else None
 
-    # Read reference audio → move to device
+    # Read reference audio → pass as (numpy_array, sr) tuple
     ref_wav, ref_sr = sf.read(ref_path)
     if ref_sr != 16000:
         import scipy.signal
         ref_wav = scipy.signal.resample(ref_wav, int(len(ref_wav) * 16000 / ref_sr))
         ref_sr = 16000
-    ref_tensor = torch.from_numpy(ref_wav).float().to(_model.device)
+
+    ref_input = (ref_wav, ref_sr)  # Tuple[numpy.ndarray, int]
 
     if mode == "icl" and ref_text:
         wavs, sr = _model.generate_voice_clone(
             text=text, language=language,
-            ref_audio=ref_tensor, ref_sr=ref_sr,
-            ref_text=ref_text,
+            ref_audio=ref_input, ref_text=ref_text,
             max_new_tokens=min(2048, max(64, len(text)*3)),
         )
     else:
         wavs, sr = _model.generate_voice_clone(
             text=text, language=language,
-            ref_audio=ref_tensor, ref_sr=ref_sr,
+            ref_audio=ref_input,
+            x_vector_only_mode=True,
             max_new_tokens=min(2048, max(64, len(text)*3)),
         )
 
